@@ -9,7 +9,7 @@ var uglify = require('gulp-uglify');
 var replace = require('gulp-replace');
 var octophant = require('octophant');
 var readline = require('readline');
-var { green, bold } = require('kleur');
+var { green, bold, red } = require('kleur');
 var exec = require('child_process').execSync;
 var plumber = require('gulp-plumber');
 var sourcemaps = require('gulp-sourcemaps');
@@ -19,6 +19,47 @@ var ROLLUP_CONFIG = require('../../rollup.config.js');
 var CONFIG = require('../config.js');
 var CURRENT_VERSION = require('../../package.json').version;
 var NEXT_VERSION;
+
+/**
+ * Escape a string so it can be used as a regexp pattern
+ * Prevents ReDoS attacks by escaping special regex characters
+ * @param {String} str - string to escape
+ * @returns {String} - escaped string
+ */
+function escapeRegex(str) {
+  return str.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+}
+
+/**
+ * Validate and sanitize a version string to prevent command injection
+ * @param {String} version - version string to validate
+ * @returns {String} - sanitized version string
+ * @throws {Error} - if version format is invalid
+ */
+function validateAndSanitizeVersion(version) {
+  if (!version || typeof version !== 'string') {
+    throw new Error('Version must be a non-empty string');
+  }
+  
+  // Allow semantic versioning format: major.minor.patch with optional pre-release/build metadata
+  const semverRegex = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+  
+  if (!semverRegex.test(version)) {
+    throw new Error('Version must follow semantic versioning format (e.g., 1.0.0, 1.0.0-alpha, 1.0.0+build)');
+  }
+  
+  return version;
+}
+
+/**
+ * Escape shell arguments to prevent command injection
+ * @param {String} arg - argument to escape
+ * @returns {String} - shell-escaped argument
+ */
+function escapeShellArg(arg) {
+  // Wrap in single quotes and escape any existing single quotes
+  return "'" + arg.replace(/'/g, "'\"'\"'") + "'";
+}
 
 gulp.task('deploy', gulp.series('deploy:prompt', 'deploy:version', 'deploy:dist', 'deploy:plugins', 'deploy:settings', 'deploy:commit', 'deploy:templates'));
 
@@ -35,11 +76,17 @@ gulp.task('deploy:prompt', function(cb) {
   rl.question(
     green('?') + ' ' + bold('What version are we moving to? (Current version is ' + CURRENT_VERSION + ') '),
     (version) => {
-      NEXT_VERSION = version
-        ? version
-        : CURRENT_VERSION;
-      rl.close();
-      cb();
+      try {
+        NEXT_VERSION = version
+          ? validateAndSanitizeVersion(version)
+          : CURRENT_VERSION;
+        rl.close();
+        cb();
+      } catch (error) {
+        console.error(red('Error: ' + error.message));
+        rl.close();
+        cb(error);
+      }
     }
   );
 });
@@ -47,7 +94,7 @@ gulp.task('deploy:prompt', function(cb) {
 // Bumps the version number in any file that has one
 gulp.task('deploy:version', function() {
   return gulp.src(CONFIG.VERSIONED_FILES, { base: process.cwd() })
-  .pipe(replace(CURRENT_VERSION, NEXT_VERSION))
+  .pipe(replace(escapeRegex(CURRENT_VERSION), NEXT_VERSION))
   .pipe(gulp.dest('.'));
 });
 
@@ -168,8 +215,8 @@ gulp.task('deploy:settings', function(done) {
 
 // Writes a commit with the changes to the version numbers
 gulp.task('deploy:commit', function() {
-  exec('git commit -am "Bump to version "' + NEXT_VERSION);
-  exec('git tag v' + NEXT_VERSION);
+  exec('git commit -am ' + escapeShellArg('Bump to version ' + NEXT_VERSION));
+  exec('git tag ' + escapeShellArg('v' + NEXT_VERSION));
   exec('git push origin develop --follow-tags');
 });
 
